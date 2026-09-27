@@ -1,11 +1,4 @@
 # MLPs vs CNNs on MNIST & CIFAR-10
-# This script runs the full suite of experiments for Project 3, including:
-# - Data loading and preprocessing for MNIST and CIFAR-10
-# - Model definitions for MLPs and CNNs
-# - Training loops with early stopping
-# - Hyperparameter search over predefined grids
-# - Auto-saving results to survive Colab disconnects
-# - Final results tables summarizing test accuracies and runtimes
 
 import json
 import time
@@ -37,9 +30,6 @@ logging.getLogger("torch._dynamo").setLevel(logging.ERROR)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # PrecachedDataset is a custom Dataset wrapper that loads all data into GPU memory at once. 
-# This can significantly speed up training by eliminating data transfer overhead during each batch, e
-# specially for small datasets like MNIST and CIFAR-10. However, it requires enough GPU memory to hold the
-#  entire dataset, so it's best used on machines with ample VRAM.
 class PrecachedDataset(torch.utils.data.Dataset):
     def __init__(self, dataset, device):
         # Use a temporary loader to process all images once
@@ -60,8 +50,6 @@ class PrecachedDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         return self.x[idx], self.y[idx]
 
-# Enable cuDNN autotuner for optimal convolution algorithms on GPU. This can significantly speed up training, 
-# especially for CNNs. On CPU, we disable it for deterministic behavior.
 if DEVICE.type == "cuda":
     torch.backends.cudnn.benchmark     = True
     torch.backends.cudnn.deterministic = False
@@ -94,11 +82,6 @@ def _make_loader(dataset, batch_size, shuffle):
 
     )
 
-# For MNIST and CIFAR-10, we apply standard normalization and split the training set into train/val subsets. 
-# The test set remains untouched for final evaluation.
-
-# MNIST: 60,000 train → 50,000 train / 10,000 val = 10,000 test.
-# Normalization: mean=0.1307, std=0.3081 (MNIST dataset standard)
 def get_mnist_loaders(batch_size, val_size=10_000):
     global MNIST_CACHE
     
@@ -110,7 +93,6 @@ def get_mnist_loaders(batch_size, val_size=10_000):
         raw_train = torchvision.datasets.MNIST("./data", train=True, download=True, transform=transform)
         raw_test = torchvision.datasets.MNIST("./data", train=False, download=True, transform=transform)
         
-        # Move everything to DEVICE (GPU) immediately
         MNIST_CACHE = {
             "train": PrecachedDataset(raw_train, DEVICE),
             "test": PrecachedDataset(raw_test, DEVICE)
@@ -128,11 +110,6 @@ def get_mnist_loaders(batch_size, val_size=10_000):
         DataLoader(MNIST_CACHE["test"], batch_size=512, shuffle=False, num_workers=0),
     )
 
-# CIFAR-10 normalization uses per-channel mean/std computed from the training set. 
-# This helps stabilize training and improve convergence for CNNs.
-
-# CIFAR-10: 50,000 train → 45,000 train / 5,000 val | 10,000 test.
-# Per-channel normalization (standard CIFAR-10 stats).
 def get_cifar10_loaders(batch_size, val_size=5_000):
     global CIFAR_CACHE
     
@@ -159,11 +136,9 @@ def get_cifar10_loaders(batch_size, val_size=5_000):
         DataLoader(CIFAR_CACHE["test"], batch_size=512, shuffle=False, num_workers=0),
     )
 
-# Model Definitions
 class MLP(nn.Module):
     # Generic MLP: flattens input → (Linear + ReLU + Dropout) × N → logits.
-    # No softmax — CrossEntropyLoss applies it internally.
-
+    
     def __init__(self, input_dim, hidden_sizes, num_classes, dropout=0.0):
         super().__init__()
         layers, prev = [], input_dim
@@ -211,9 +186,6 @@ class SimpleCNN(nn.Module):
             dim = self.features(x[:1]).flatten(1).shape[1]
         self.classifier = nn.Linear(dim, self.num_classes).to(x.device)
 
-    # During the first forward pass, we check if the classifier head is built. 
-    # If not, we run a dummy input through the conv layers to determine the output dimension 
-    # and build the head accordingly. This lazy initialization allows us to keep the model definition clean and flexible.
     def forward(self, x):
         if self.classifier is None:
             self._build_head(x)
@@ -222,7 +194,7 @@ class SimpleCNN(nn.Module):
 # The enhanced CNN adds a third conv layer with more filters (64) and preserves spatial resolution by skipping the final MaxPool.
 class EnhancedCNN(nn.Module):
     # 3 conv layers with increasing filters (16→32→64), BN + MaxPool, FC head.
-    # Uses 3×3 kernels and stride=1 throughout (per project spec).
+    # Uses 3×3 kernels and stride=1 throughout.
 
     def __init__(self, in_channels, num_classes):
         super().__init__()
@@ -293,9 +265,6 @@ def evaluate(model, loader):
 
 # Training loop with early stopping based on validation accuracy. Saves the best model state and returns it along with the best validation accuracy, stopping epoch, and elapsed time.
 def run_training(model, train_loader, val_loader, epochs=10, lr=1e-3, optimizer_name="adam", weight_decay=0.0, patience=3):
-    # Trains with early stopping (patience on val accuracy).
-    # Returns: best_val_acc, best_state_dict, stopping_epoch, elapsed_seconds
-
     criterion = nn.CrossEntropyLoss()
     optimizer = (
         optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -327,8 +296,7 @@ def run_training(model, train_loader, val_loader, epochs=10, lr=1e-3, optimizer_
     return best_val_acc, best_state, epoch, time.time() - t0
 
 # After finding the best hyperparameters on the validation set, we retrain a fresh model on the 
-# combined train+val dataset and evaluate it on the test set. This gives us an unbiased estimate 
-# of the final test accuracy for the chosen hyperparameters.
+# combined train+val dataset and evaluate it on the test set.
 def retrain_and_test(model_fn, combined_loader, test_loader, lr, optimizer_name, weight_decay, epochs=10):
     model     = compile_model(model_fn().to(DEVICE))
     criterion = nn.CrossEntropyLoss()
@@ -446,10 +414,8 @@ CNN_CONFIGS = [
     {"lr": 0.01,   "batch_size": 32,  "weight_decay": 1e-4},
 ]
 
-# Results Saving Utility
 SAVE_PATH = "results.json"
 
-# This function saves the results dictionary to a JSON file after each experiment. 
 def save_results(results):
     with open(SAVE_PATH, "w") as f:
         json.dump(results, f, indent=2)
